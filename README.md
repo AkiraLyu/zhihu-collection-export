@@ -1,6 +1,6 @@
 # zhihu-collection-export
 
-把知乎收藏夹导出为单个 Markdown 文件的本地 CLI。它参考油猴脚本的接口流程，直接分页请求：
+把知乎收藏夹导出为 Obsidian 友好的 Markdown 文件夹。它参考油猴脚本的接口流程，直接分页请求：
 
 ```text
 GET https://www.zhihu.com/api/v4/collections/{collection_id}/items?offset=0&limit=20
@@ -20,11 +20,10 @@ cargo run --release -- 'https://www.zhihu.com/collection/997879559'
 cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports
 ```
 
-指定输出文件：
+导出结果会写到 `输出目录/收藏夹名/`。如果接口没有返回收藏夹名，则使用收藏夹 ID 作为文件夹名。文件夹内包含：
 
-```bash
-cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports/my-collection.md
-```
+- `00_index.md`：目录页，使用 Obsidian 双链链接到各条内容。
+- `01_标题.md`、`02_标题.md`：每条收藏内容一个 Markdown 文件。
 
 指定浏览器：
 

@@ -28,7 +28,7 @@ struct Cli {
     /// Zhihu collection URL, for example https://www.zhihu.com/collection/997879559
     collection: Option<String>,
 
-    /// Output Markdown file or output directory
+    /// Output root directory. A collection subdirectory is created inside it.
     #[arg(short, long)]
     output: Option<PathBuf>,
 
@@ -144,6 +144,26 @@ struct Author {
 #[derive(Debug, Deserialize)]
 struct CollectionInfo {
     title: Option<String>,
+    collection: Option<CollectionInfoBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CollectionInfoBody {
+    title: Option<String>,
+}
+
+struct ExportedCollection {
+    title: String,
+    collection_id: String,
+    total: Option<u64>,
+    items: Vec<ExportedItem>,
+}
+
+struct ExportedItem {
+    index: usize,
+    title: String,
+    file_stem: String,
+    markdown: String,
 }
 
 #[tokio::main]
@@ -176,22 +196,21 @@ async fn run(cli: Cli) -> Result<()> {
         }
     );
 
-    let title = fetch_collection_title(&client, &collection_id)
-        .await
-        .unwrap_or_else(|| format!("知乎收藏夹 {}", collection_id));
+    let fetched_title = fetch_collection_title(&client, &collection_id).await;
+    let title = fetched_title
+        .clone()
+        .unwrap_or_else(|| collection_id.to_string());
 
-    let markdown = export_collection(&client, &collection_id, &title, &cli).await?;
-    let output = output_path(cli.output.as_deref(), &collection_id, &title)?;
-    if let Some(parent) = output
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("创建输出目录失败: {}", parent.display()))?;
-    }
-    fs::write(&output, markdown).with_context(|| format!("写入文件失败: {}", output.display()))?;
+    let exported = export_collection(&client, &collection_id, &title, &cli).await?;
+    let output_dir = collection_output_dir(
+        cli.output.as_deref(),
+        &collection_id,
+        fetched_title.as_deref(),
+    );
+    write_collection(&output_dir, &exported)
+        .with_context(|| format!("写入导出目录失败: {}", output_dir.display()))?;
 
-    eprintln!("导出完成: {}", output.display());
+    eprintln!("导出完成: {}", output_dir.display());
     Ok(())
 }
 
@@ -200,7 +219,7 @@ async fn export_collection(
     collection_id: &str,
     title: &str,
     cli: &Cli,
-) -> Result<String> {
+) -> Result<ExportedCollection> {
     if cli.limit == 0 || cli.limit > 100 {
         bail!("--limit 必须在 1..=100 之间");
     }
@@ -208,7 +227,7 @@ async fn export_collection(
     let mut offset = 0;
     let mut total = None;
     let mut processed = 0usize;
-    let mut sections = Vec::new();
+    let mut items = Vec::new();
 
     loop {
         let page = fetch_page(
@@ -237,7 +256,7 @@ async fn export_collection(
 
         for item in page.data {
             processed += 1;
-            sections.push(render_item(processed, item));
+            items.push(render_item(processed, item));
         }
 
         if let Some(total) = total {
@@ -259,17 +278,17 @@ async fn export_collection(
         sleep(Duration::from_millis(cli.delay_ms)).await;
     }
 
-    let mut output = String::new();
-    output.push_str(&format!("# {}\n\n", title.trim()));
-    output.push_str(&format!(
-        "- 收藏夹链接: https://www.zhihu.com/collection/{}\n",
-        collection_id
-    ));
-    output.push_str(&format!("- 导出条目数: {}\n\n", processed));
-    output.push_str("---\n\n");
-    output.push_str(&sections.join("\n---\n\n"));
-    output.push('\n');
-    Ok(output)
+    let width = item_number_width(items.len());
+    for item in &mut items {
+        item.file_stem = item_file_stem(item.index, &item.title, width);
+    }
+
+    Ok(ExportedCollection {
+        title: title.trim().to_string(),
+        collection_id: collection_id.to_string(),
+        total,
+        items,
+    })
 }
 
 async fn fetch_page(
@@ -291,7 +310,11 @@ async fn fetch_collection_title(client: &Client, collection_id: &str) -> Option<
     let info = fetch_json::<CollectionInfo>(client, &url, 1, 300)
         .await
         .ok()?;
-    let title = info.title?.trim().to_string();
+    let title = info
+        .title
+        .or_else(|| info.collection.and_then(|collection| collection.title))?
+        .trim()
+        .to_string();
     if title.is_empty() { None } else { Some(title) }
 }
 
@@ -785,12 +808,15 @@ fn parse_collection_id(input: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("无法从参数中解析收藏夹 ID: {input}"))
 }
 
-fn render_item(index: usize, item: CollectionItem) -> String {
+fn render_item(index: usize, item: CollectionItem) -> ExportedItem {
     let Some(content) = item.content else {
-        return format!(
-            "## {}. [内容不可用]\n\n该收藏条目已删除、不可见，或接口没有返回内容。\n",
-            index
-        );
+        let title = "[内容不可用]".to_string();
+        return ExportedItem {
+            index,
+            title: title.clone(),
+            file_stem: String::new(),
+            markdown: format!("# {title}\n\n该收藏条目已删除、不可见，或接口没有返回内容。\n"),
+        };
     };
 
     let title = item_title(&content);
@@ -798,7 +824,8 @@ fn render_item(index: usize, item: CollectionItem) -> String {
     let kind = content.kind.as_deref().unwrap_or("unknown");
 
     let mut output = String::new();
-    output.push_str(&format!("## {}. {}\n\n", index, title));
+    output.push_str(&format!("# {}\n\n", title));
+    output.push_str(&format!("- 序号: {}\n", index));
     output.push_str(&format!("- 类型: {}\n", kind));
     if let Some(url) = item_url.as_deref() {
         output.push_str(&format!("- 原文链接: {}\n", url));
@@ -832,7 +859,12 @@ fn render_item(index: usize, item: CollectionItem) -> String {
 
     if kind == "zvideo" {
         output.push_str("视频条目通常不包含正文，已保留标题和链接。\n");
-        return output;
+        return ExportedItem {
+            index,
+            title,
+            file_stem: String::new(),
+            markdown: output,
+        };
     }
 
     if let Some(html) = content
@@ -853,7 +885,12 @@ fn render_item(index: usize, item: CollectionItem) -> String {
         output.push_str("接口未返回正文。\n");
     }
 
-    output
+    ExportedItem {
+        index,
+        title,
+        file_stem: String::new(),
+        markdown: output,
+    }
 }
 
 fn item_title(content: &Content) -> String {
@@ -1156,14 +1193,85 @@ fn cleanup_markdown(input: &str) -> String {
     output.trim().to_string()
 }
 
-fn output_path(output: Option<&Path>, collection_id: &str, title: &str) -> Result<PathBuf> {
-    let file_name = format!("{}_{}.md", sanitize_filename(title), collection_id);
-    match output {
-        Some(path) if path.extension().is_some_and(|extension| extension == "md") => {
-            Ok(path.to_path_buf())
-        }
-        Some(path) => Ok(path.join(file_name)),
-        None => Ok(PathBuf::from(file_name)),
+fn collection_output_dir(
+    output_root: Option<&Path>,
+    collection_id: &str,
+    title: Option<&str>,
+) -> PathBuf {
+    let folder_name = title
+        .map(sanitize_filename)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| collection_id.to_string());
+
+    match output_root {
+        Some(root) => root.join(folder_name),
+        None => PathBuf::from(folder_name),
+    }
+}
+
+fn write_collection(output_dir: &Path, collection: &ExportedCollection) -> Result<()> {
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("创建输出目录失败: {}", output_dir.display()))?;
+    fs::write(output_dir.join("00_index.md"), render_index(collection))
+        .with_context(|| format!("写入索引失败: {}", output_dir.join("00_index.md").display()))?;
+
+    for item in &collection.items {
+        let path = output_dir.join(format!("{}.md", item.file_stem));
+        fs::write(&path, &item.markdown)
+            .with_context(|| format!("写入条目失败: {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn render_index(collection: &ExportedCollection) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("# {}\n\n", collection.title));
+    output.push_str(&format!(
+        "- 收藏夹链接: https://www.zhihu.com/collection/{}\n",
+        collection.collection_id
+    ));
+    if let Some(total) = collection.total {
+        output.push_str(&format!("- 接口报告条目数: {}\n", total));
+    }
+    output.push_str(&format!("- 导出条目数: {}\n\n", collection.items.len()));
+    output.push_str("## 目录\n\n");
+
+    for item in &collection.items {
+        output.push_str(&format!(
+            "{}. [[{}|{}]]\n",
+            item.index,
+            item.file_stem,
+            obsidian_alias(&item.title)
+        ));
+    }
+
+    output
+}
+
+fn item_number_width(item_count: usize) -> usize {
+    item_count.max(1).to_string().len().max(2)
+}
+
+fn item_file_stem(index: usize, title: &str, width: usize) -> String {
+    format!(
+        "{:0width$}_{}",
+        index,
+        sanitize_filename(title),
+        width = width
+    )
+}
+
+fn obsidian_alias(title: &str) -> String {
+    let alias = title
+        .trim()
+        .replace('|', "｜")
+        .replace('[', "［")
+        .replace(']', "］");
+    if alias.is_empty() {
+        "无标题".to_string()
+    } else {
+        alias
     }
 }
 
@@ -1172,7 +1280,21 @@ fn sanitize_filename(input: &str) -> String {
     for ch in input.chars() {
         if matches!(
             ch,
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\r' | '\n' | '\t'
+            '/' | '\\'
+                | ':'
+                | '*'
+                | '?'
+                | '"'
+                | '<'
+                | '>'
+                | '|'
+                | '['
+                | ']'
+                | '#'
+                | '^'
+                | '\r'
+                | '\n'
+                | '\t'
         ) {
             output.push('_');
         } else {
@@ -1248,5 +1370,42 @@ mod tests {
             item_url(&content).unwrap(),
             "https://www.zhihu.com/question/123/answer/456"
         );
+    }
+
+    #[test]
+    fn chooses_collection_folder_from_title_or_id() {
+        assert_eq!(
+            collection_output_dir(Some(Path::new("exports")), "997879559", Some("Linux/OS"))
+                .to_string_lossy(),
+            "exports/Linux_OS"
+        );
+        assert_eq!(
+            collection_output_dir(Some(Path::new("exports")), "997879559", None).to_string_lossy(),
+            "exports/997879559"
+        );
+    }
+
+    #[test]
+    fn renders_obsidian_index_links() {
+        let collection = ExportedCollection {
+            title: "收藏夹".to_string(),
+            collection_id: "123".to_string(),
+            total: Some(1),
+            items: vec![ExportedItem {
+                index: 1,
+                title: "A [B] | C".to_string(),
+                file_stem: "01_A _B_ _ C".to_string(),
+                markdown: "# A".to_string(),
+            }],
+        };
+        let index = render_index(&collection);
+        assert!(index.contains("[[01_A _B_ _ C|A ［B］ ｜ C]]"));
+    }
+
+    #[test]
+    fn parses_nested_collection_title_response() {
+        let info: CollectionInfo =
+            serde_json::from_str(r#"{"collection":{"title":"Linux"}}"#).unwrap();
+        assert_eq!(info.collection.unwrap().title.unwrap(), "Linux");
     }
 }
