@@ -1,0 +1,2 @@
+[build]
+rustflags = ["--cfg=rustix_use_libc"]
