@@ -56,6 +56,10 @@ struct Cli {
     #[arg(long)]
     key_file: Option<PathBuf>,
 
+    /// Also write links.txt with one collected item URL per line.
+    #[arg(long)]
+    export_links: bool,
+
     /// API page size. Zhihu currently works well with 20.
     #[arg(long, default_value_t = DEFAULT_LIMIT)]
     limit: u32,
@@ -162,6 +166,7 @@ struct ExportedCollection {
 struct ExportedItem {
     index: usize,
     title: String,
+    url: Option<String>,
     file_stem: String,
     markdown: String,
 }
@@ -207,7 +212,7 @@ async fn run(cli: Cli) -> Result<()> {
         &collection_id,
         fetched_title.as_deref(),
     );
-    write_collection(&output_dir, &exported)
+    write_collection(&output_dir, &exported, cli.export_links)
         .with_context(|| format!("写入导出目录失败: {}", output_dir.display()))?;
 
     eprintln!("导出完成: {}", output_dir.display());
@@ -814,6 +819,7 @@ fn render_item(index: usize, item: CollectionItem) -> ExportedItem {
         return ExportedItem {
             index,
             title: title.clone(),
+            url: None,
             file_stem: String::new(),
             markdown: format!("# {title}\n\n该收藏条目已删除、不可见，或接口没有返回内容。\n"),
         };
@@ -862,6 +868,7 @@ fn render_item(index: usize, item: CollectionItem) -> ExportedItem {
         return ExportedItem {
             index,
             title,
+            url: item_url,
             file_stem: String::new(),
             markdown: output,
         };
@@ -888,6 +895,7 @@ fn render_item(index: usize, item: CollectionItem) -> ExportedItem {
     ExportedItem {
         index,
         title,
+        url: item_url,
         file_stem: String::new(),
         markdown: output,
     }
@@ -1209,11 +1217,25 @@ fn collection_output_dir(
     }
 }
 
-fn write_collection(output_dir: &Path, collection: &ExportedCollection) -> Result<()> {
+fn write_collection(
+    output_dir: &Path,
+    collection: &ExportedCollection,
+    export_links: bool,
+) -> Result<()> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("创建输出目录失败: {}", output_dir.display()))?;
     fs::write(output_dir.join("00_index.md"), render_index(collection))
         .with_context(|| format!("写入索引失败: {}", output_dir.join("00_index.md").display()))?;
+    if export_links {
+        fs::write(output_dir.join("links.txt"), render_links_txt(collection)).with_context(
+            || {
+                format!(
+                    "写入链接列表失败: {}",
+                    output_dir.join("links.txt").display()
+                )
+            },
+        )?;
+    }
 
     for item in &collection.items {
         let path = output_dir.join(format!("{}.md", item.file_stem));
@@ -1246,6 +1268,20 @@ fn render_index(collection: &ExportedCollection) -> String {
         ));
     }
 
+    output
+}
+
+fn render_links_txt(collection: &ExportedCollection) -> String {
+    let mut output = collection
+        .items
+        .iter()
+        .filter_map(|item| item.url.as_deref())
+        .filter(|url| !url.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !output.is_empty() {
+        output.push('\n');
+    }
     output
 }
 
@@ -1394,12 +1430,50 @@ mod tests {
             items: vec![ExportedItem {
                 index: 1,
                 title: "A [B] | C".to_string(),
+                url: Some("https://zhuanlan.zhihu.com/p/1".to_string()),
                 file_stem: "01_A _B_ _ C".to_string(),
                 markdown: "# A".to_string(),
             }],
         };
         let index = render_index(&collection);
         assert!(index.contains("[[01_A _B_ _ C|A ［B］ ｜ C]]"));
+    }
+
+    #[test]
+    fn renders_plain_links_txt() {
+        let collection = ExportedCollection {
+            title: "收藏夹".to_string(),
+            collection_id: "123".to_string(),
+            total: Some(3),
+            items: vec![
+                ExportedItem {
+                    index: 1,
+                    title: "A".to_string(),
+                    url: Some("https://zhuanlan.zhihu.com/p/1".to_string()),
+                    file_stem: "01_A".to_string(),
+                    markdown: "# A".to_string(),
+                },
+                ExportedItem {
+                    index: 2,
+                    title: "B".to_string(),
+                    url: None,
+                    file_stem: "02_B".to_string(),
+                    markdown: "# B".to_string(),
+                },
+                ExportedItem {
+                    index: 3,
+                    title: "C".to_string(),
+                    url: Some("https://www.zhihu.com/question/1/answer/2".to_string()),
+                    file_stem: "03_C".to_string(),
+                    markdown: "# C".to_string(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            render_links_txt(&collection),
+            "https://zhuanlan.zhihu.com/p/1\nhttps://www.zhihu.com/question/1/answer/2\n"
+        );
     }
 
     #[test]

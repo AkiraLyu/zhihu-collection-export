@@ -25,6 +25,12 @@ cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports
 - `00_index.md`：目录页，使用 Obsidian 双链链接到各条内容。
 - `01_标题.md`、`02_标题.md`：每条收藏内容一个 Markdown 文件。
 
+如需额外导出纯文本链接列表，添加 `--export-links`，会在收藏夹目录下生成 `links.txt`，每行一个收藏条目的网页链接：
+
+```bash
+cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports --export-links
+```
+
 指定浏览器：
 
 ```bash
