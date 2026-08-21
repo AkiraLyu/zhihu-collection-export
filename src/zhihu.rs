@@ -38,11 +38,14 @@ pub(crate) struct Content {
     pub(crate) kind: Option<String>,
     pub(crate) url: Option<String>,
     pub(crate) title: Option<String>,
-    pub(crate) content: Option<String>,
+    pub(crate) excerpt_title: Option<String>,
+    pub(crate) content: Option<Value>,
     pub(crate) excerpt: Option<String>,
     pub(crate) question: Option<Question>,
     pub(crate) author: Option<Author>,
+    #[serde(alias = "created")]
     pub(crate) created_time: Option<i64>,
+    #[serde(alias = "updated")]
     pub(crate) updated_time: Option<i64>,
 }
 
@@ -241,5 +244,33 @@ mod tests {
         let info: CollectionInfo =
             serde_json::from_str(r#"{"collection":{"title":"Linux"}}"#).unwrap();
         assert_eq!(info.collection.unwrap().title.unwrap(), "Linux");
+    }
+
+    #[test]
+    fn parses_pin_with_structured_content() {
+        let page: CollectionPage = serde_json::from_str(
+            r#"{
+                "data": [{
+                    "content": {
+                        "id": "123",
+                        "type": "pin",
+                        "excerpt_title": "想法标题",
+                        "content": [
+                            {"type": "text", "content": "<p>想法正文</p>"},
+                            {"type": "link_card", "url": "https://www.zhihu.com/question/1"}
+                        ],
+                        "created": 10,
+                        "updated": 20
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let content = page.data[0].content.as_ref().unwrap();
+        assert_eq!(content.excerpt_title.as_deref(), Some("想法标题"));
+        assert!(content.content.as_ref().unwrap().is_array());
+        assert_eq!(content.created_time, Some(10));
+        assert_eq!(content.updated_time, Some(20));
     }
 }

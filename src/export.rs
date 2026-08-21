@@ -168,13 +168,11 @@ fn render_item(index: usize, item: CollectionItem) -> ExportedItem {
         };
     }
 
-    if let Some(html) = content
-        .content
-        .as_deref()
-        .filter(|html| !html.trim().is_empty())
-    {
-        output.push_str(&html_to_markdown(html));
-        output.push('\n');
+    if let Some(markdown) = content.content.as_ref().and_then(content_to_markdown) {
+        output.push_str(&markdown);
+        if !markdown.ends_with('\n') {
+            output.push('\n');
+        }
     } else if let Some(excerpt) = content
         .excerpt
         .as_deref()
@@ -195,10 +193,70 @@ fn render_item(index: usize, item: CollectionItem) -> ExportedItem {
     }
 }
 
+fn content_to_markdown(content: &Value) -> Option<String> {
+    match content {
+        Value::String(html) if !html.trim().is_empty() => Some(html_to_markdown(html)),
+        Value::Array(blocks) => {
+            let rendered = blocks
+                .iter()
+                .filter_map(render_content_block)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if rendered.trim().is_empty() {
+                None
+            } else {
+                Some(rendered)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn render_content_block(block: &Value) -> Option<String> {
+    let block = block.as_object()?;
+    let kind = block.get("type").and_then(Value::as_str);
+
+    if let Some(html) = block
+        .get("content")
+        .or_else(|| block.get("own_text"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|html| !html.is_empty())
+    {
+        let markdown = html_to_markdown(html);
+        if !markdown.trim().is_empty() {
+            return Some(markdown.trim().to_string());
+        }
+    }
+
+    let url = block
+        .get("url")
+        .or_else(|| block.get("original_url"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty())?;
+    let url = normalize_zhihu_url(url);
+    let title = block
+        .get("title")
+        .or_else(|| block.get("data_draft_title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty());
+
+    if matches!(kind, Some("image")) {
+        Some(format!("![{}]({})", title.unwrap_or("图片"), url))
+    } else if let Some(title) = title {
+        Some(format!("[{}]({})", title, url))
+    } else {
+        Some(url)
+    }
+}
+
 fn item_title(content: &Content) -> String {
     content
         .title
         .as_deref()
+        .or(content.excerpt_title.as_deref())
         .or_else(|| {
             content
                 .question
@@ -425,6 +483,7 @@ mod tests {
             kind: Some("answer".to_string()),
             url: None,
             title: None,
+            excerpt_title: None,
             content: None,
             excerpt: None,
             question: Some(Question {
@@ -510,5 +569,35 @@ mod tests {
 https://www.zhihu.com/question/1/answer/2
 "
         );
+    }
+
+    #[test]
+    fn renders_pin_structured_content() {
+        let item = render_item(
+            1,
+            CollectionItem {
+                content: Some(Content {
+                    id: Some(Value::from("123")),
+                    kind: Some("pin".to_string()),
+                    url: Some("https://www.zhihu.com/pin/123".to_string()),
+                    title: None,
+                    excerpt_title: Some("想法标题".to_string()),
+                    content: Some(serde_json::json!([
+                        {"type": "text", "content": "<p>想法<strong>正文</strong></p>"},
+                        {"type": "link_card", "url": "https://www.zhihu.com/question/1"}
+                    ])),
+                    excerpt: None,
+                    question: None,
+                    author: None,
+                    created_time: Some(10),
+                    updated_time: Some(20),
+                }),
+            },
+        );
+
+        assert_eq!(item.title, "想法标题");
+        assert!(item.markdown.contains("想法**正文**"));
+        assert!(item.markdown.contains("https://www.zhihu.com/question/1"));
+        assert!(!item.markdown.contains("接口未返回正文"));
     }
 }
