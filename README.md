@@ -31,6 +31,40 @@ cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports
 cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports --export-links
 ```
 
+图片默认保留外链。使用 `--images` 选择图片导出方式，支持回答、文章的 HTML 图片和想法中的图片块：
+
+| 选项 | 导出方式 |
+| --- | --- |
+| `--images remote` | 默认值，保留图片 URL，不下载图片。 |
+| `--images local` | 下载到收藏夹目录下的 `images/` 子文件夹，Markdown 使用相对路径。 |
+| `--images base64` | 下载并转为 `data:image/...;base64,...`，直接嵌入 Markdown，不生成图片文件。 |
+
+将图片保存到本地，便于在 Obsidian 中离线查看：
+
+```bash
+cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports --images local
+```
+
+输出示例（图片文件名使用内容的 SHA-256，避免同名覆盖，也方便重复图片共用文件）：
+
+```text
+exports/收藏夹名/
+├── 00_index.md
+├── 01_标题.md
+└── images/
+    └── <sha256>.jpg
+```
+
+将图片嵌入 Markdown，便于单文件携带：
+
+```bash
+cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports --images base64
+```
+
+Base64 会增大 Markdown 文件体积，查看器需要支持 `data:` 图片链接。两种下载模式都会优先使用 HTML 的 `data-original`、`data-actualsrc`，最后才使用 `src`；同一图片 URL 在一次导出中只下载一次，已有的 `data:` 图片保持原样。
+
+图片请求不携带知乎登录 Cookie。下载失败、响应不是图片或单张图片超过 50 MiB 时，会提示并保留原链接，继续导出其他内容；瞬时请求错误、HTTP 429 和 5xx 按 `--retries` 重试。本地目录创建或文件写入失败则会报错退出。
+
 指定浏览器：
 
 ```bash

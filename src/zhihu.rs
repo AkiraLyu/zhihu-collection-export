@@ -12,6 +12,8 @@ use tokio::time::sleep;
 use url::Url;
 
 pub(crate) const ZHIHU_HOST: &str = "https://www.zhihu.com";
+pub(crate) const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+     (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct CollectionPage {
@@ -151,13 +153,7 @@ fn should_retry(status: StatusCode) -> bool {
 
 pub(crate) fn zhihu_client(cookie_header: &str, collection_id: &str) -> Result<Client> {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        ),
-    );
+    headers.insert(USER_AGENT, HeaderValue::from_static(BROWSER_USER_AGENT));
     headers.insert(
         ACCEPT,
         HeaderValue::from_static("application/json, text/plain, */*"),

@@ -11,7 +11,8 @@ use tokio::time::sleep;
 
 use crate::{
     cli::Cli,
-    markdown::html_to_markdown,
+    images::ImageExporter,
+    markdown::{html_to_markdown, markdown_image},
     zhihu::{Author, CollectionItem, Content, ZHIHU_HOST, fetch_page, normalize_zhihu_url},
 };
 
@@ -35,6 +36,7 @@ pub(crate) async fn export_collection(
     collection_id: &str,
     title: &str,
     cli: &Cli,
+    output_dir: &Path,
 ) -> Result<ExportedCollection> {
     if cli.limit == 0 || cli.limit > 100 {
         bail!("--limit 必须在 1..=100 之间");
@@ -44,6 +46,7 @@ pub(crate) async fn export_collection(
     let mut total = None;
     let mut processed = 0usize;
     let mut items = Vec::new();
+    let mut images = ImageExporter::new(cli.images, output_dir, cli.retries, cli.delay_ms)?;
 
     loop {
         let page = fetch_page(
@@ -72,7 +75,7 @@ pub(crate) async fn export_collection(
 
         for item in page.data {
             processed += 1;
-            items.push(render_item(processed, item));
+            items.push(render_item(processed, item, &mut images).await?);
         }
 
         if let Some(total) = total {
@@ -107,16 +110,20 @@ pub(crate) async fn export_collection(
     })
 }
 
-fn render_item(index: usize, item: CollectionItem) -> ExportedItem {
+async fn render_item(
+    index: usize,
+    item: CollectionItem,
+    images: &mut ImageExporter,
+) -> Result<ExportedItem> {
     let Some(content) = item.content else {
         let title = "[内容不可用]".to_string();
-        return ExportedItem {
+        return Ok(ExportedItem {
             index,
             title: title.clone(),
             url: None,
             file_stem: String::new(),
             markdown: format!("# {title}\n\n该收藏条目已删除、不可见，或接口没有返回内容。\n"),
-        };
+        });
     };
 
     let title = item_title(&content);
@@ -159,16 +166,20 @@ fn render_item(index: usize, item: CollectionItem) -> ExportedItem {
 
     if kind == "zvideo" {
         output.push_str("视频条目通常不包含正文，已保留标题和链接。\n");
-        return ExportedItem {
+        return Ok(ExportedItem {
             index,
             title,
             url: item_url,
             file_stem: String::new(),
             markdown: output,
-        };
+        });
     }
 
-    if let Some(markdown) = content.content.as_ref().and_then(content_to_markdown) {
+    let markdown = match content.content.as_ref() {
+        Some(content) => content_to_markdown(content, images).await?,
+        None => None,
+    };
+    if let Some(markdown) = markdown {
         output.push_str(&markdown);
         if !markdown.ends_with('\n') {
             output.push('\n');
@@ -184,24 +195,31 @@ fn render_item(index: usize, item: CollectionItem) -> ExportedItem {
         output.push_str("接口未返回正文。\n");
     }
 
-    ExportedItem {
+    Ok(ExportedItem {
         index,
         title,
         url: item_url,
         file_stem: String::new(),
         markdown: output,
-    }
+    })
 }
 
-fn content_to_markdown(content: &Value) -> Option<String> {
-    match content {
-        Value::String(html) if !html.trim().is_empty() => Some(html_to_markdown(html)),
+async fn content_to_markdown(
+    content: &Value,
+    images: &mut ImageExporter,
+) -> Result<Option<String>> {
+    Ok(match content {
+        Value::String(html) if !html.trim().is_empty() => {
+            Some(html_to_markdown(html, images).await?)
+        }
         Value::Array(blocks) => {
-            let rendered = blocks
-                .iter()
-                .filter_map(render_content_block)
-                .collect::<Vec<_>>()
-                .join("\n\n");
+            let mut rendered = Vec::new();
+            for block in blocks {
+                if let Some(markdown) = render_content_block(block, images).await? {
+                    rendered.push(markdown);
+                }
+            }
+            let rendered = rendered.join("\n\n");
             if rendered.trim().is_empty() {
                 None
             } else {
@@ -209,11 +227,13 @@ fn content_to_markdown(content: &Value) -> Option<String> {
             }
         }
         _ => None,
-    }
+    })
 }
 
-fn render_content_block(block: &Value) -> Option<String> {
-    let block = block.as_object()?;
+async fn render_content_block(block: &Value, images: &mut ImageExporter) -> Result<Option<String>> {
+    let Some(block) = block.as_object() else {
+        return Ok(None);
+    };
     let kind = block.get("type").and_then(Value::as_str);
 
     if let Some(html) = block
@@ -223,18 +243,21 @@ fn render_content_block(block: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|html| !html.is_empty())
     {
-        let markdown = html_to_markdown(html);
+        let markdown = html_to_markdown(html, images).await?;
         if !markdown.trim().is_empty() {
-            return Some(markdown.trim().to_string());
+            return Ok(Some(markdown.trim().to_string()));
         }
     }
 
-    let url = block
+    let Some(url) = block
         .get("url")
         .or_else(|| block.get("original_url"))
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|url| !url.is_empty())?;
+        .filter(|url| !url.is_empty())
+    else {
+        return Ok(None);
+    };
     let url = normalize_zhihu_url(url);
     let title = block
         .get("title")
@@ -243,13 +266,17 @@ fn render_content_block(block: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|title| !title.is_empty());
 
-    if matches!(kind, Some("image")) {
-        Some(format!("![{}]({})", title.unwrap_or("图片"), url))
+    Ok(if matches!(kind, Some("image")) {
+        images.prepare(&url).await?;
+        Some(markdown_image(
+            title.unwrap_or("图片"),
+            images.resolve(&url),
+        ))
     } else if let Some(title) = title {
         Some(format!("[{}]({})", title, url))
     } else {
         Some(url)
-    }
+    })
 }
 
 fn item_title(content: &Content) -> String {
@@ -473,8 +500,14 @@ fn sanitize_filename(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
     use super::*;
-    use crate::zhihu::Question;
+    use crate::{
+        cli::ImageMode,
+        test_support::{ImageServer, SVG, png, response},
+        zhihu::Question,
+    };
 
     #[test]
     fn renders_answer_url_from_ids() {
@@ -571,8 +604,10 @@ https://www.zhihu.com/question/1/answer/2
         );
     }
 
-    #[test]
-    fn renders_pin_structured_content() {
+    #[tokio::test]
+    async fn renders_pin_structured_content() {
+        let mut images =
+            ImageExporter::new(crate::cli::ImageMode::Remote, Path::new("."), 0, 0).unwrap();
         let item = render_item(
             1,
             CollectionItem {
@@ -593,11 +628,131 @@ https://www.zhihu.com/question/1/answer/2
                     updated_time: Some(20),
                 }),
             },
-        );
+            &mut images,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(item.title, "想法标题");
         assert!(item.markdown.contains("想法**正文**"));
         assert!(item.markdown.contains("https://www.zhihu.com/question/1"));
         assert!(!item.markdown.contains("接口未返回正文"));
+    }
+
+    #[tokio::test]
+    async fn writes_html_and_pin_images_in_all_modes() {
+        for mode in [ImageMode::Remote, ImageMode::Local, ImageMode::Base64] {
+            let server = ImageServer::start(vec![
+                response(200, &[("Content-Type", "image/png")], &png()),
+                response(200, &[("Content-Type", "image/svg+xml")], SVG),
+            ]);
+            let directory = tempfile::tempdir().unwrap();
+            let output = directory.path().join("中文 收藏夹");
+            let mut images = ImageExporter::new(mode, &output, 0, 0).unwrap();
+            let photo = server.url("/photo.png?tag=1&size=2");
+            let svg = server.url("/image.svg");
+            let html_url = photo.replace('&', "&amp;");
+            let entries = [
+                serde_json::json!({"content": {
+                    "type": "answer", "id": 1, "title": "回答", "question": {"id": 9},
+                    "content": format!(
+                        "<p>正文</p><img data-original=\"{html_url}\" data-actualsrc=\"{}\" src=\"{}\" alt=\"封面\"><a href=\"{html_url}\">查看原图</a><pre><code>![示例]({photo})</code></pre>",
+                        server.url("/thumbnail"), server.url("/placeholder")
+                    )
+                }}),
+                serde_json::json!({"content": {
+                    "type": "article", "id": 2, "title": "文章",
+                    "content": format!("<ul><li><img data-actualsrc=\"{html_url}\" alt=\"列表图\"></li></ul>")
+                }}),
+                serde_json::json!({"content": {
+                    "type": "pin", "id": 3, "title": "想法", "url": "https://www.zhihu.com/pin/3",
+                    "content": [
+                        {"type": "image", "url": photo, "title": "想法图"},
+                        {"type": "image", "original_url": svg, "title": "矢量图"},
+                        {"type": "text", "own_text": format!("<p><img src=\"{svg}\" alt=\"正文图\"></p>")},
+                        {"type": "link_card", "url": photo, "title": "外链"}
+                    ]
+                }}),
+            ];
+            let mut items = Vec::new();
+            for (index, entry) in entries.into_iter().enumerate() {
+                let mut item = render_item(
+                    index + 1,
+                    serde_json::from_value(entry).unwrap(),
+                    &mut images,
+                )
+                .await
+                .unwrap();
+                item.file_stem = item_file_stem(item.index, &item.title, 2);
+                items.push(item);
+            }
+            let collection = ExportedCollection {
+                title: "中文 收藏夹".to_string(),
+                collection_id: "123".to_string(),
+                total: Some(3),
+                items,
+            };
+            write_collection(&output, &collection, true).unwrap();
+            let answer = fs::read_to_string(output.join("01_回答.md")).unwrap();
+            let article = fs::read_to_string(output.join("02_文章.md")).unwrap();
+            let pin = fs::read_to_string(output.join("03_想法.md")).unwrap();
+            let photo_destination = answer
+                .split_once("![封面](")
+                .unwrap()
+                .1
+                .split_once(')')
+                .unwrap()
+                .0;
+            let svg_destination = pin
+                .split_once("![矢量图](")
+                .unwrap()
+                .1
+                .split_once(')')
+                .unwrap()
+                .0;
+            assert!(article.contains(&format!("![列表图]({photo_destination})")));
+            assert!(pin.contains(&format!("![想法图]({photo_destination})")));
+            assert!(pin.contains(&format!("![正文图]({svg_destination})")));
+            assert!(answer.contains(&format!("[查看原图]({photo})")));
+            assert!(answer.contains(&format!("```\n![示例]({photo})\n```")));
+            assert!(pin.contains(&format!("[外链]({photo})")));
+            match mode {
+                ImageMode::Remote => {
+                    assert_eq!(photo_destination, photo);
+                    assert_eq!(svg_destination, svg);
+                    assert!(server.requests().is_empty());
+                    assert!(!output.join("images").exists());
+                }
+                ImageMode::Local => {
+                    assert!(photo_destination.starts_with("images/"));
+                    assert!(svg_destination.starts_with("images/"));
+                    assert_eq!(fs::read(output.join(photo_destination)).unwrap(), png());
+                    assert_eq!(fs::read(output.join(svg_destination)).unwrap(), SVG);
+                    assert_eq!(fs::read_dir(output.join("images")).unwrap().count(), 2);
+                }
+                ImageMode::Base64 => {
+                    for (destination, mime, bytes) in [
+                        (photo_destination, "image/png", png()),
+                        (svg_destination, "image/svg+xml", SVG.to_vec()),
+                    ] {
+                        let payload = destination
+                            .strip_prefix(&format!("data:{mime};base64,"))
+                            .unwrap();
+                        assert_eq!(STANDARD.decode(payload).unwrap(), bytes);
+                    }
+                    assert!(!output.join("images").exists());
+                }
+            }
+            if mode != ImageMode::Remote {
+                assert_eq!(server.requests().len(), 2);
+                assert!(server.requests()[0].starts_with("GET /photo.png?tag=1&size=2 "));
+            }
+            let index = fs::read_to_string(output.join("00_index.md")).unwrap();
+            assert!(index.contains("[[01_回答|回答]]"));
+            assert_eq!(
+                fs::read_to_string(output.join("links.txt")).unwrap(),
+                "https://www.zhihu.com/question/9/answer/1\nhttps://zhuanlan.zhihu.com/p/2\nhttps://www.zhihu.com/pin/3\n"
+            );
+        }
     }
 }

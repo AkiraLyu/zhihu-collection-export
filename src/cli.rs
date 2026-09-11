@@ -42,6 +42,10 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) export_links: bool,
 
+    /// Image handling: keep URLs, save to images/, or embed Base64 data URLs.
+    #[arg(long, value_enum, default_value_t = ImageMode::Remote)]
+    pub(crate) images: ImageMode,
+
     /// API page size. Zhihu currently works well with 20.
     #[arg(long, default_value_t = DEFAULT_LIMIT)]
     pub(crate) limit: u32,
@@ -70,4 +74,32 @@ pub(crate) enum BrowserChoice {
     Arc,
     Zen,
     Safari,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum ImageMode {
+    Remote,
+    Local,
+    Base64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_image_modes_and_defaults_to_remote() {
+        assert_eq!(Cli::parse_from(["export", "123"]).images, ImageMode::Remote);
+        for (value, expected) in [
+            ("remote", ImageMode::Remote),
+            ("local", ImageMode::Local),
+            ("base64", ImageMode::Base64),
+        ] {
+            assert_eq!(
+                Cli::parse_from(["export", "123", "--images", value]).images,
+                expected
+            );
+        }
+        assert!(Cli::try_parse_from(["export", "123", "--images", "invalid"]).is_err());
+    }
 }

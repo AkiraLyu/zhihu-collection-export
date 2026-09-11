@@ -1,8 +1,12 @@
 mod cli;
 mod cookies;
 mod export;
+mod images;
 mod markdown;
 mod zhihu;
+
+#[cfg(test)]
+mod test_support;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
@@ -49,12 +53,12 @@ async fn run(cli: Cli) -> Result<()> {
         .clone()
         .unwrap_or_else(|| collection_id.to_string());
 
-    let exported = export_collection(&client, &collection_id, &title, &cli).await?;
     let output_dir = collection_output_dir(
         cli.output.as_deref(),
         &collection_id,
         fetched_title.as_deref(),
     );
+    let exported = export_collection(&client, &collection_id, &title, &cli, &output_dir).await?;
     write_collection(&output_dir, &exported, cli.export_links)
         .with_context(|| format!("写入导出目录失败: {}", output_dir.display()))?;
 
