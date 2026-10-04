@@ -76,4 +76,21 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: zhihu-collection-export ${{ github.ref_name }}
+          body: |
+            ## 下载
+
+            | 平台 | 文件 |
+            | --- | --- |
+            | Linux x86_64 | `zhihu-collection-export-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz` |
+            | Windows x86_64 | `zhihu-collection-export-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip` |
+
+            压缩包内包含可执行文件和 README，解压后即可运行，不需要安装 Rust 工具链。
+
+            ## 用法
+
+            ```bash
+            zhihu-collection-export 'https://www.zhihu.com/collection/997879559' -o exports
+            ```
+
+            完整说明见[项目文档](https://github.com/${{ github.repository }}#readme)。
           files: dist/*
