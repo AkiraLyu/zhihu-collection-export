@@ -1,102 +1,126 @@
 # zhihu-collection-export
 
-把知乎收藏夹导出为 Obsidian 友好的 Markdown 文件夹。它参考油猴脚本的接口流程，直接分页请求：
+把知乎收藏夹导出为 Obsidian 友好的 Markdown 文件夹。
+
+程序复用浏览器中已有的知乎登录态，直接调用知乎 Web API 分页读取收藏夹内容，把每条收藏渲染为独立的 Markdown 文件，并生成使用 Obsidian 双链的索引页。整个过程只读取数据，不修改知乎上的任何内容。
+
+## 功能
+
+- 支持回答、文章、想法和视频四类收藏条目，保留标题、作者、时间和原文链接。
+- 生成 `00_index.md` 索引页，用 Obsidian 双链指向每条内容。
+- 图片可保留外链、下载到本地或嵌入 Base64。
+- 可选生成纯链接列表 `links.txt`。
+- 只读取 `zhihu.com` 域下的 Cookie，不打印、不写入磁盘。
+
+## 工作原理
+
+程序从浏览器或命令行取得 `zhihu.com` 的 Cookie，然后请求知乎的分页接口：
 
 ```text
 GET https://www.zhihu.com/api/v4/collections/{collection_id}/items?offset=0&limit=20
 ```
 
-程序默认只读取浏览器里 `zhihu.com` 域名下的 Cookie，不打印、不写入 Cookie。支持 Chrome、Chromium、Edge、Brave、Firefox、LibreWolf、Vivaldi、Opera、Arc、Zen，macOS 上还支持 Safari。浏览器 Cookie 读取由 `rookie` crate 完成。
+接口返回的条目转换为 Markdown 后写入本地目录。实现见[开发说明](docs/development.md)。
 
-## 使用
+## 环境要求
 
-```bash
-cargo run --release -- 'https://www.zhihu.com/collection/997879559'
-```
+- 一个已登录知乎的桌面浏览器，或一份有效的 Cookie header。
+- 从源码构建时需要 Rust 1.88 或更高版本。
 
-指定输出目录：
+## 安装
 
-```bash
-cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports
-```
+### 预编译二进制
 
-导出结果会写到 `输出目录/收藏夹名/`。如果接口没有返回收藏夹名，则使用收藏夹 ID 作为文件夹名。文件夹内包含：
+从 [Releases](https://github.com/AkiraLyu/zhihu-collection-export/releases/latest) 页面下载对应平台的压缩包：
 
-- `00_index.md`：目录页，使用 Obsidian 双链链接到各条内容。
-- `01_标题.md`、`02_标题.md`：每条收藏内容一个 Markdown 文件。
-
-如需额外导出纯文本链接列表，添加 `--export-links`，会在收藏夹目录下生成 `links.txt`，每行一个收藏条目的网页链接：
-
-```bash
-cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports --export-links
-```
-
-图片默认保留外链。使用 `--images` 选择图片导出方式，支持回答、文章的 HTML 图片和想法中的图片块：
-
-| 选项 | 导出方式 |
+| 平台 | 文件名后缀 |
 | --- | --- |
-| `--images remote` | 默认值，保留图片 URL，不下载图片。 |
-| `--images local` | 下载到收藏夹目录下的 `images/` 子文件夹，Markdown 使用相对路径。 |
-| `--images base64` | 下载并转为 `data:image/...;base64,...`，直接嵌入 Markdown，不生成图片文件。 |
+| Linux x86_64 | `x86_64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `x86_64-pc-windows-msvc.zip` |
 
-将图片保存到本地，便于在 Obsidian 中离线查看：
+Linux 上解压并试运行：
 
 ```bash
-cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports --images local
+tar xzf zhihu-collection-export-v*-x86_64-unknown-linux-gnu.tar.gz
+cd zhihu-collection-export-v*-x86_64-unknown-linux-gnu
+./zhihu-collection-export --help
 ```
 
-输出示例（图片文件名使用内容的 SHA-256，避免同名覆盖，也方便重复图片共用文件）：
+Windows 上解压压缩包，在解压出的目录中运行 `zhihu-collection-export.exe`。压缩包内附本 README。
+
+### 从源码构建
+
+需要 Rust 1.88 或更高版本：
+
+```bash
+git clone https://github.com/AkiraLyu/zhihu-collection-export.git
+cd zhihu-collection-export
+cargo build --release
+```
+
+生成的二进制文件为 `target/release/zhihu-collection-export`。
+
+下文示例用 `zhihu-collection-export` 表示可执行文件。从源码构建时，也可以改用 `cargo run --release --` 运行。
+
+## 快速开始
+
+```bash
+zhihu-collection-export 'https://www.zhihu.com/collection/997879559' -o exports
+```
+
+程序把结果写入 `exports/收藏夹名/`。收藏夹名取自接口返回的标题，标题不可用时改用收藏夹 ID。
+
+位置参数接受收藏夹链接或纯数字 ID，两种写法等价：
+
+```bash
+zhihu-collection-export 997879559 -o exports
+```
+
+## 输出结构
 
 ```text
-exports/收藏夹名/
-├── 00_index.md
-├── 01_标题.md
-└── images/
-    └── <sha256>.jpg
+exports/
+└── Linux/
+    ├── 00_index.md
+    ├── 01_如何入门 Linux.md
+    ├── 02_常用命令速查.md
+    ├── links.txt          # 使用 --export-links 时生成
+    └── images/            # 使用 --images local 时生成
+        └── <sha256>.jpg
 ```
 
-将图片嵌入 Markdown，便于单文件携带：
+各文件的字段和渲染规则见[输出格式](docs/output-format.md)。
 
-```bash
-cargo run --release -- 'https://www.zhihu.com/collection/997879559' -o exports --images base64
-```
+## 常用选项
 
-Base64 会增大 Markdown 文件体积，查看器需要支持 `data:` 图片链接。两种下载模式都会优先使用 HTML 的 `data-original`、`data-actualsrc`，最后才使用 `src`；同一图片 URL 在一次导出中只下载一次，已有的 `data:` 图片保持原样。
+| 选项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-o, --output <DIR>` | 当前目录 | 输出根目录，程序在其下创建收藏夹子目录 |
+| `--images <MODE>` | `remote` | 图片处理方式：`remote`、`local` 或 `base64` |
+| `--export-links` | 关闭 | 额外生成 `links.txt` |
+| `--browser <BROWSER>` | `auto` | 读取 Cookie 的浏览器 |
+| `--cookie <COOKIE>` | 无 | 直接传入 Cookie header，跳过浏览器读取 |
+| `--diagnose-cookies` | 关闭 | 检查各浏览器的 Cookie 状态，不打印 Cookie 值 |
+| `--limit <N>` | `20` | 每页请求条数，建议保持默认值 |
+| `--delay-ms <MS>` | `800` | 分页请求之间的等待时间，同时作为重试退避基数 |
+| `--retries <N>` | `3` | 瞬时请求错误的重试次数 |
 
-图片请求不携带知乎登录 Cookie。下载失败、响应不是图片或单张图片超过 50 MiB 时，会提示并保留原链接，继续导出其他内容；瞬时请求错误、HTTP 429 和 5xx 按 `--retries` 重试。本地目录创建或文件写入失败则会报错退出。
+完整参数说明见[命令行参考](docs/usage.md)。
 
-指定浏览器：
+## 文档
 
-```bash
-cargo run --release -- 'https://www.zhihu.com/collection/997879559' --browser chrome
-```
+| 文档 | 内容 |
+| --- | --- |
+| [命令行参考](docs/usage.md) | 全部参数、收藏夹标识解析、日志与退出码、限速与重试 |
+| [输出格式](docs/output-format.md) | 目录结构、索引页、条目文件、图片与文件名规则 |
+| [Cookie 获取](docs/cookies.md) | Cookie 来源优先级、浏览器支持、自定义 Profile、故障排查 |
+| [开发说明](docs/development.md) | 模块结构、数据流、构建与测试 |
 
-诊断本机浏览器里是否有知乎登录 Cookie。这个命令只显示数量和是否有 `z_c0`，不会打印 Cookie 值：
-
-```bash
-cargo run -- --diagnose-cookies
-```
-
-如果自动读取 Cookie 失败，可以从浏览器 DevTools 里复制请求的 Cookie header：
-
-```bash
-cargo run --release -- 'https://www.zhihu.com/collection/997879559' \
-  --cookie 'z_c0=...; _xsrf=...; d_c0=...'
-```
-
-自定义浏览器 Profile：
-
-```bash
-cargo run --release -- 'https://www.zhihu.com/collection/997879559' \
-  --cookies-db '/absolute/path/to/Cookies' \
-  --key-file '/absolute/path/to/Local State'
-```
-
-`--key-file` 主要用于 Windows Chromium 系浏览器；Firefox 通常只需要 `--cookies-db`。
-
-## 注意
+## 注意事项
 
 - 只能导出当前 Cookie 有权限访问的内容。
-- 默认要求 Cookie 中包含知乎登录态 `z_c0`，避免误用匿名 Cookie 后请求失败。需要强行匿名请求时加 `--allow-anonymous`。
-- 知乎接口和风控策略可能变化；遇到 401、403、429 时，先确认浏览器已登录知乎，再降低请求频率，例如 `--delay-ms 2000`。
-- 视频、删除、不可见、接口未返回正文的条目会保留标题和链接，并在 Markdown 中标注原因。
+- 默认要求 Cookie 中包含知乎登录态 `z_c0`，避免误用匿名 Cookie 后请求失败。确实需要匿名请求时加 `--allow-anonymous`。
+- 知乎接口和风控策略可能变化。遇到 401、403、429 时，先确认浏览器已登录知乎，再降低请求频率，例如 `--delay-ms 2000`。
+- 图片下载失败、响应不是图片或单张图片超过 50 MiB 时，程序保留原链接并继续导出其他内容。
+- 视频条目的正文位置写入固定说明，导出文件只包含头部信息和原文链接。接口未返回内容的条目（已删除或不可见）标记为 `[内容不可用]`，同样保留在索引中。
+- 请遵守知乎的服务条款，仅导出自己有权访问的内容。
